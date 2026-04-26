@@ -80,10 +80,18 @@ FRONTEND_ORIGIN=http://localhost:3000
 SUPABASE_URL=https://your-project-id.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 SUPABASE_STORAGE_BUCKET=documents
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your-openrouter-api-key
+OPENROUTER_MODEL=openrouter/free
+OPENROUTER_FALLBACK_MODELS=
+OPENROUTER_SITE_URL=http://localhost:3000
+OPENROUTER_APP_NAME=Document Intelligence API
 GEMINI_API_KEY=your-gemini-api-key
 GEMINI_MODEL=gemini-2.5-flash
 GEMINI_FALLBACK_MODELS=gemini-2.5-flash-lite,gemini-2.0-flash
 ```
+
+`LLM_PROVIDER` can be `openrouter` or `gemini`. The example above uses `openrouter`, and `OPENROUTER_MODEL=openrouter/free` uses OpenRouter's current free-model router.
 
 ### Frontend
 

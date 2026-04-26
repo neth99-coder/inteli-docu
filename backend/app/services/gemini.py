@@ -40,13 +40,22 @@ say exactly:
 Return structured output with bullet points.
 
 Keep it concise:
-- maximum 5 bullet points
+- maximum 8 bullet points
 - each bullet must be one sentence
-- each bullet should be under 28 words
+- each bullet should be under 40 words
+- summarize only the current page
+- use previous-page context only to resolve carry-over references, abbreviations, or sentences that continue onto the current page
+- never turn previous-page context into standalone bullets
+- ignore next pages completely
 - do not repeat the source text
 - do not infer rules from headings alone
-- prioritize concrete obligations, exemptions, deadlines, extensions, and qualifying conditions over generic background statements
+- do not summarize a table of contents, heading list, or navigation entries as if they were page conclusions
+- treat formulas, decision trees, eligibility flowcharts, and explicitly stated program goals as substantive content when they appear on the current page
+- prioritize concrete obligations, exemptions, deadlines, extensions, qualifying conditions, rates, caps, formulas, and stated policy targets over generic background statements
 - include separate bullets for materially different deadlines or exceptions on the same page
+- capture every materially distinct rate, threshold, cap, refund limit, eligibility condition, exception, or compliance rule visible on the current page
+- if the page includes a formula, percentage credit, target year, review period, or filing condition, include each as its own bullet when materially relevant
+- if the page mixes policy narrative with an eligibility flowchart, cover both the main policy facts and the operative eligibility rules
 - do not include introductory or closing remarks"""
 
 PAGE_QA_PROMPT = """You are an expert tax accountant and financial analyst.
@@ -67,6 +76,7 @@ TOC_HEADING_PATTERNS = (
     "table of contents",
     "contents",
     "index",
+    "outline",
 )
 
 
@@ -94,11 +104,24 @@ def is_reference_page(text: str) -> bool:
         for line in lines
         if re.search(r"(?:\.{2,}|\s)\d{1,4}$", line)
     )
+    page_number_only_lines = sum(
+        1
+        for line in lines
+        if re.fullmatch(r"\d{1,4}", line)
+    )
+    print('Page number only lines:', page_number_only_lines)
     question_listing_lines = sum(
         1
         for line in lines
         if re.match(r"^(question|section|chapter|appendix)\b", line.strip(), re.IGNORECASE)
     )
+    heading_like_lines = sum(
+        1
+        for line in lines
+        if not re.search(r"[.!?;:]\s*$", line) and len(line.split()) <= 14
+    )
+    list_like_ratio = numeric_tail_lines / len(lines)
+    heading_like_ratio = heading_like_lines / len(lines)
 
     if heading_hit and numeric_tail_lines >= 3:
         return True
@@ -109,7 +132,38 @@ def is_reference_page(text: str) -> bool:
     if len(lines) >= 8 and question_listing_lines >= 4 and numeric_tail_lines >= 3:
         return True
 
+    if len(lines) >= 10 and list_like_ratio >= 0.6 and heading_like_ratio >= 0.6:
+        return True
+
+    if len(lines) >= 10 and numeric_tail_lines + page_number_only_lines >= len(lines) * 0.7:
+        return True
+    print('Page number only lines:', page_number_only_lines, 'Total lines:', len(lines))
+    if page_number_only_lines >= len(lines) * 0.4:
+        print('BUG DETECTED: High ratio of page number only lines. This may indicate a parsing issue where page numbers are extracted without their associated text. Lines:', lines)
+        return True
+
     return False
+
+
+def normalize_page_text(text: str | None) -> str:
+    if not text:
+        return ""
+
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def build_previous_page_context(text: str | None, max_chars: int = 1600) -> str | None:
+    normalized = normalize_page_text(text)
+    if not normalized or is_reference_page(normalized):
+        return None
+
+    if len(normalized) <= max_chars:
+        return normalized
+
+    # Keep the tail because page-to-page carry-over usually appears near the end
+    # of the previous page.
+    return normalized[-max_chars:].lstrip()
 
 
 async def call_gemini(prompt: str) -> str:
@@ -172,18 +226,18 @@ async def call_gemini(prompt: str) -> str:
 async def generate_page_summary(
     current_page_text: str,
     previous_page_text: str | None = None,
-    next_page_text: str | None = None,
 ) -> str:
     if is_reference_page(current_page_text):
         return NO_ACCOUNTING_SUMMARY
 
+    previous_page_context = build_previous_page_context(previous_page_text)
+    normalized_current_page = normalize_page_text(current_page_text)
     prompt = (
         f"{ACCOUNTANT_SUMMARY_PROMPT}\n\n"
-        "Use adjacent pages only for context.\n"
-        "Summarize only the current page.\n\n"
-        f"Previous page context:\n{previous_page_text or '[No previous page context]'}\n\n"
-        f"Current page:\n{current_page_text or '[No text extracted from this page]'}\n\n"
-        f"Next page context:\n{next_page_text or '[No next page context]'}"
+        "Before writing bullets, first decide whether the current page contains substantive body text.\n"
+        "If it is mainly a contents page, navigation page, index, or heading list, return the no-information sentence exactly.\n\n"
+        f"Previous page context for continuity only:\n{previous_page_context or '[No previous page context]'}\n\n"
+        f"Current page to summarize:\n{normalized_current_page or '[No text extracted from this page]'}"
     )
 
     text = await call_gemini(prompt)

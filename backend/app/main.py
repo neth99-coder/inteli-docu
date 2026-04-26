@@ -16,9 +16,9 @@ from app.schemas import (
     UpdatePageAnnotationsRequest,
     UploadResponse,
 )
-from app.services.gemini import (
-    GeminiRateLimitError,
-    GeminiServiceError,
+from app.services.llm import (
+    LlmRateLimitError,
+    LlmServiceError,
     NO_ACCOUNTING_SUMMARY,
     answer_page_question,
     generate_page_summary,
@@ -178,14 +178,13 @@ async def generate_and_store_page_summary(page_id: str) -> None:
         )
         return
 
-    previous_page_text, next_page_text = get_adjacent_page_context(
+    previous_page_text, _next_page_text = get_adjacent_page_context(
         latest_page["document_id"],
         latest_page["page_number"],
     )
     summary = await generate_page_summary(
         current_page_text=latest_page.get("content", ""),
         previous_page_text=previous_page_text,
-        next_page_text=next_page_text,
     )
     (
         supabase.table("pages")
@@ -202,14 +201,13 @@ async def regenerate_page_summary(page_id: str) -> dict:
     if is_reference_page(page.get("content", "")):
         summary = NO_ACCOUNTING_SUMMARY
     else:
-        previous_page_text, next_page_text = get_adjacent_page_context(
+        previous_page_text, _next_page_text = get_adjacent_page_context(
             page["document_id"],
             page["page_number"],
         )
         summary = await generate_page_summary(
             current_page_text=page.get("content", ""),
             previous_page_text=previous_page_text,
-            next_page_text=next_page_text,
         )
 
     (
@@ -527,9 +525,9 @@ async def ask_question_for_page(page_id: str, payload: AskPageQuestionRequest) -
             previous_page_text=previous_page_text,
             next_page_text=next_page_text,
         )
-    except GeminiRateLimitError as exc:
+    except LlmRateLimitError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
-    except GeminiServiceError as exc:
+    except LlmServiceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return AskPageQuestionResponse(answer=answer)

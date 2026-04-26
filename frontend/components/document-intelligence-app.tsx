@@ -630,17 +630,40 @@ function parseSummary(summary: string | null | undefined): { kind: "empty" | "it
     return { kind: "empty", items: [] };
   }
 
-  const items = normalized
+  const lines = normalized
     .split("\n")
     .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.replace(/^[-*•]\s*/, "").replace(/^\d+\.\s*/, "").trim())
     .filter(Boolean);
+
+  const bulletStartPattern = /^([-*•]|\d+[.)])\s+/;
+  const items: string[] = [];
+  let currentItem = "";
+
+  for (const line of lines) {
+    if (bulletStartPattern.test(line)) {
+      if (currentItem) {
+        items.push(currentItem.trim());
+      }
+      currentItem = line.replace(bulletStartPattern, "").trim();
+      continue;
+    }
+
+    if (!currentItem) {
+      currentItem = line;
+      continue;
+    }
+
+    currentItem = `${currentItem} ${line}`.trim();
+  }
+
+  if (currentItem) {
+    items.push(currentItem.trim());
+  }
 
   const conciseItems = (items.length > 0 ? items : [normalized])
     .map((item) => compactSentence(item))
     .filter(Boolean)
-    .slice(0, 5);
+    .slice(0, 8);
 
   return conciseItems.length > 0
     ? { kind: "items", items: conciseItems }
@@ -648,15 +671,5 @@ function parseSummary(summary: string | null | undefined): { kind: "empty" | "it
 }
 
 function compactSentence(value: string) {
-  const singleLine = value.replace(/\s+/g, " ").trim();
-  if (!singleLine) {
-    return "";
-  }
-
-  if (singleLine.length <= 180) {
-    return singleLine;
-  }
-
-  const trimmed = singleLine.slice(0, 177).trimEnd();
-  return `${trimmed}...`;
+  return value.replace(/\s+/g, " ").trim();
 }
