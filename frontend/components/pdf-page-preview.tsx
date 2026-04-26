@@ -49,6 +49,8 @@ export function PdfPagePreview({
 }: PdfPagePreviewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const pageStageRef = useRef<HTMLDivElement | null>(null);
+  const annotationElementsRef = useRef(new Map<string, HTMLElement>());
+  const focusResetTimerRef = useRef<number | null>(null);
   const [width, setWidth] = useState(0);
   const [isRendering, setIsRendering] = useState(true);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -56,6 +58,7 @@ export function PdfPagePreview({
   const [draftHighlight, setDraftHighlight] = useState<DraftHighlight | null>(null);
   const [pendingNote, setPendingNote] = useState<PendingNote | null>(null);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
+  const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -84,6 +87,14 @@ export function PdfPagePreview({
     setActiveNoteId(null);
     setMode("browse");
   }, [fileUrl, pageNumber]);
+
+  useEffect(() => {
+    return () => {
+      if (focusResetTimerRef.current !== null) {
+        window.clearTimeout(focusResetTimerRef.current);
+      }
+    };
+  }, []);
 
   const noteAnnotations = useMemo(
     () => annotations.filter((annotation) => annotation.type === "note"),
@@ -257,6 +268,51 @@ export function PdfPagePreview({
     await persistAnnotations(nextAnnotations);
   }
 
+  function registerAnnotationElement(annotationId: string, element: HTMLElement | null) {
+    if (!element) {
+      annotationElementsRef.current.delete(annotationId);
+      return;
+    }
+
+    annotationElementsRef.current.set(annotationId, element);
+  }
+
+  function focusAnnotation(annotation: PageAnnotation) {
+    if (annotation.type === "note") {
+      setActiveNoteId(annotation.id);
+    } else {
+      setActiveNoteId(null);
+    }
+
+    setMode("browse");
+    setFocusedAnnotationId(annotation.id);
+
+    if (focusResetTimerRef.current !== null) {
+      window.clearTimeout(focusResetTimerRef.current);
+    }
+
+    focusResetTimerRef.current = window.setTimeout(() => {
+      setFocusedAnnotationId((current) => (current === annotation.id ? null : current));
+    }, 1800);
+
+    window.requestAnimationFrame(() => {
+      const target = annotationElementsRef.current.get(annotation.id);
+      if (!target) {
+        return;
+      }
+
+      target.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+        inline: "center",
+      });
+
+      if (target instanceof HTMLButtonElement) {
+        target.focus({ preventScroll: true });
+      }
+    });
+  }
+
   return (
     <div className="pdf-preview-stack">
       <div className="annotation-toolbar">
@@ -343,14 +399,15 @@ export function PdfPagePreview({
                   {annotations.map((annotation) =>
                     annotation.type === "highlight" ? (
                       <div
-                        className="page-highlight"
+                        className={`page-highlight ${focusedAnnotationId === annotation.id ? "focused" : ""}`}
+                        ref={(element) => registerAnnotationElement(annotation.id, element)}
                         key={annotation.id}
                         style={toBoxStyle(annotation)}
                         title="Saved highlight"
                       />
                     ) : (
                       <button
-                        className={`note-pin ${activeNoteId === annotation.id ? "active" : ""}`}
+                        className={`note-pin ${activeNoteId === annotation.id ? "active" : ""} ${focusedAnnotationId === annotation.id ? "focused" : ""}`}
                         key={annotation.id}
                         onClick={(event) => {
                           event.preventDefault();
@@ -359,6 +416,7 @@ export function PdfPagePreview({
                             current === annotation.id ? null : annotation.id
                           );
                         }}
+                        ref={(element) => registerAnnotationElement(annotation.id, element)}
                         style={{
                           left: `${annotation.x * 100}%`,
                           top: `${annotation.y * 100}%`,
@@ -495,6 +553,14 @@ export function PdfPagePreview({
                 className="annotation-card"
                 key={annotation.id}
                 open={annotation.type === "note" && activeNoteId === annotation.id}
+                onClick={(event) => {
+                  const target = event.target as HTMLElement;
+                  if (target.closest(".note-delete")) {
+                    return;
+                  }
+
+                  focusAnnotation(annotation);
+                }}
                 onToggle={(event) => {
                   const target = event.currentTarget;
                   if (annotation.type === "note") {
@@ -503,7 +569,7 @@ export function PdfPagePreview({
                 }}
               >
                 <summary>
-                  <span>
+                  <span className="annotation-jump">
                     {annotation.type === "highlight"
                       ? `Highlight ${index + 1}`
                       : `Note ${noteAnnotations.findIndex((item) => item.id === annotation.id) + 1}`}

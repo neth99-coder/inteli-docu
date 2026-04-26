@@ -498,11 +498,18 @@ select {
   border: 1px solid rgba(173, 110, 17, 0.45);
   background: rgba(255, 221, 87, 0.35);
   pointer-events: none;
+  transition: box-shadow 180ms ease, border-color 180ms ease, transform 180ms ease;
 }
 
 .page-highlight.draft {
   background: rgba(255, 221, 87, 0.22);
   border-style: dashed;
+}
+
+.page-highlight.focused {
+  border-color: rgba(30, 107, 75, 0.92);
+  box-shadow: 0 0 0 4px rgba(30, 107, 75, 0.2);
+  animation: annotationPulse 1.2s ease;
 }
 
 .note-pin {
@@ -522,10 +529,16 @@ select {
   box-shadow: 0 10px 20px rgba(20, 47, 37, 0.24);
   cursor: pointer;
   pointer-events: auto;
+  transition: box-shadow 180ms ease, transform 180ms ease;
 }
 
 .note-pin.active {
   background: #0f2e23;
+}
+
+.note-pin.focused {
+  box-shadow: 0 0 0 5px rgba(30, 107, 75, 0.18);
+  animation: annotationPulse 1.2s ease;
 }
 
 .note-popover,
@@ -617,6 +630,12 @@ select {
   list-style: none;
   font-weight: 700;
   color: var(--ink);
+}
+
+.annotation-jump {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
 }
 
 .annotation-card summary::-webkit-details-marker {
@@ -845,6 +864,21 @@ select {
     opacity: 0.55;
   }
   50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes annotationPulse {
+  0% {
+    transform: scale(0.98);
+    opacity: 0.92;
+  }
+  45% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+  100% {
     transform: scale(1);
     opacity: 1;
   }
