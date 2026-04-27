@@ -69,6 +69,8 @@ Rules:
 - be precise about dates, filing obligations, thresholds, exceptions, penalties, and conditions
 - keep the answer concise but complete
 - use short paragraphs or bullet points when helpful
+- Do not repeat same information from the current page multiple times in the answer. If the same information appears multiple times, mention it only once in the answer.
+- All your bullet points or paragrahps should cover the current page content. Do not include any bullet point or paragraph that is not supported by the current page content. If the current page does not provide enough information to answer the question, say that the page does not provide enough information to answer the question.
 """
 
 
