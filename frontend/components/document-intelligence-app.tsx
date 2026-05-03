@@ -32,7 +32,12 @@ const PdfPagePreview = dynamic(
 const SUMMARY_POLL_INTERVAL_MS = 2000;
 const SUMMARY_POLL_ATTEMPTS = 8;
 
-export function DocumentIntelligenceApp() {
+type DocumentIntelligenceAppProps = {
+  authToken?: string | null;
+  userId: string;
+};
+
+export function DocumentIntelligenceApp({ authToken, userId }: DocumentIntelligenceAppProps) {
   const [documents, setDocuments] = useState<DocumentListItem[]>([]);
   const [pages, setPages] = useState<PageListItem[]>([]);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
@@ -57,7 +62,7 @@ export function DocumentIntelligenceApp() {
 
   useEffect(() => {
     void loadDocuments();
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     if (!selectedDocumentId) {
@@ -87,12 +92,28 @@ export function DocumentIntelligenceApp() {
     void loadPage(selectedPageId);
   }, [selectedPageId]);
 
+  function getUserHeaders() {
+    const headers: Record<string, string> = {};
+
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`;
+    }
+
+    if (userId) {
+      headers["X-User-Id"] = userId;
+    }
+
+    return Object.keys(headers).length > 0 ? headers : undefined;
+  }
+
   async function loadDocuments() {
     setIsBootstrapping(true);
     setError(null);
 
     try {
-      const documentList = await apiFetch<DocumentListItem[]>("/documents");
+      const documentList = await apiFetch<DocumentListItem[]>("/documents", {
+        headers: getUserHeaders(),
+      });
       setDocuments(documentList);
 
       if (documentList.length > 0) {
@@ -111,7 +132,9 @@ export function DocumentIntelligenceApp() {
     setPageDetail(null);
 
     try {
-      const pageList = await apiFetch<PageListItem[]>(`/document/${documentId}/pages`);
+      const pageList = await apiFetch<PageListItem[]>(`/document/${documentId}/pages`, {
+        headers: getUserHeaders(),
+      });
       setPages(pageList);
 
       if (pageList.length === 0) {
@@ -130,7 +153,9 @@ export function DocumentIntelligenceApp() {
 
   async function loadDocumentFileUrl(documentId: string) {
     try {
-      const response = await apiFetch<{ url: string }>(`/document/${documentId}/file-url`);
+      const response = await apiFetch<{ url: string }>(`/document/${documentId}/file-url`, {
+        headers: getUserHeaders(),
+      });
       setDocumentFileUrl(response.url);
     } catch {
       setDocumentFileUrl(null);
@@ -142,7 +167,9 @@ export function DocumentIntelligenceApp() {
     setError(null);
 
     try {
-      const page = await apiFetch<PageDetail>(`/page/${pageId}`);
+      const page = await apiFetch<PageDetail>(`/page/${pageId}`, {
+        headers: getUserHeaders(),
+      });
       setPageState(page);
 
       if (!page.summary) {
@@ -165,7 +192,9 @@ export function DocumentIntelligenceApp() {
       }
 
       try {
-        const page = await apiFetch<PageDetail>(`/page/${pageId}`);
+        const page = await apiFetch<PageDetail>(`/page/${pageId}`, {
+          headers: getUserHeaders(),
+        });
         setPageState(page);
 
         if (page.summary) {
@@ -209,6 +238,7 @@ export function DocumentIntelligenceApp() {
 
     try {
       const response = await apiFetch<{ answer: string }>(`/page/${pageDetail.id}/ask`, {
+        headers: getUserHeaders(),
         method: "POST",
         json: { question },
       });
@@ -246,6 +276,7 @@ export function DocumentIntelligenceApp() {
       payload.append("file", file);
 
       const result = await fetch(`${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"}/upload`, {
+        headers: getUserHeaders(),
         method: "POST",
         body: payload,
       });
@@ -283,6 +314,7 @@ export function DocumentIntelligenceApp() {
 
     try {
       await apiFetch<{ status: string }>(`/document/${selectedDocument.id}`, {
+        headers: getUserHeaders(),
         method: "DELETE",
       });
 
@@ -312,6 +344,7 @@ export function DocumentIntelligenceApp() {
 
     try {
       const updatedPage = await apiFetch<PageDetail>(`/page/${pageDetail.id}/annotations`, {
+        headers: getUserHeaders(),
         method: "PUT",
         json: { annotations },
       });
@@ -336,6 +369,7 @@ export function DocumentIntelligenceApp() {
 
     try {
       const updatedPage = await apiFetch<PageDetail>(`/page/${pageDetail.id}/regenerate-summary`, {
+        headers: getUserHeaders(),
         method: "POST",
       });
       setPageState(updatedPage);

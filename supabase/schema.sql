@@ -3,8 +3,12 @@ create extension if not exists pgcrypto;
 create table if not exists public.documents (
   id uuid primary key default gen_random_uuid(),
   name text not null,
+  user_id text not null default 'default',
   created_at timestamptz not null default now()
 );
+
+alter table public.documents
+  add column if not exists user_id text not null default 'default';
 
 create table if not exists public.pages (
   id uuid primary key default gen_random_uuid(),

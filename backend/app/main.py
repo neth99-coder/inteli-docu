@@ -1,9 +1,6 @@
-from pathlib import Path
-
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from postgrest.exceptions import APIError
-from storage3.exceptions import StorageApiError
 
 from app.config import get_settings
 from app.db import get_supabase
@@ -24,6 +21,14 @@ from app.services.llm import (
     generate_page_summary,
     is_reference_page,
 )
+from app.services.auth import get_authenticated_user
+from app.services.document_storage import (
+    create_document_download_url,
+    delete_document_file,
+    ensure_storage_bucket,
+    normalize_user_id,
+    upload_document_bytes,
+)
 from app.services.pdf import extract_pages_from_pdf
 
 settings = get_settings()
@@ -37,62 +42,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-def ensure_storage_bucket() -> None:
-    supabase = get_supabase()
-
-    try:
-        supabase.storage.get_bucket(settings.supabase_storage_bucket)
-    except StorageApiError as exc:
-        if getattr(exc, "status", None) != 404:
-            raise HTTPException(status_code=500, detail="Failed to access Supabase Storage.") from exc
-
-        try:
-            supabase.storage.create_bucket(
-                settings.supabase_storage_bucket,
-                options={"public": False},
-            )
-        except StorageApiError as create_exc:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Supabase Storage bucket is missing and could not be created automatically. "
-                    "Create the bucket named "
-                    f"'{settings.supabase_storage_bucket}' and try again."
-                ),
-            ) from create_exc
-
-
-def get_document_storage_path(document_id: str) -> str:
-    return f"{document_id}/original.pdf"
-
-
-def resolve_document_storage_path(document_id: str) -> str | None:
-    supabase = get_supabase()
-    preferred_path = get_document_storage_path(document_id)
-
-    try:
-        supabase.storage.from_(settings.supabase_storage_bucket).create_signed_url(
-            preferred_path,
-            60,
-        )
-        return preferred_path
-    except StorageApiError:
-        pass
-
-    try:
-        stored_files = supabase.storage.from_(settings.supabase_storage_bucket).list(document_id)
-    except StorageApiError:
-        return None
-
-    for item in stored_files:
-        file_name = item.get("name")
-        if isinstance(file_name, str) and file_name.lower().endswith(".pdf"):
-            return f"{document_id}/{file_name}"
-
-    return None
-
 
 def get_adjacent_page_context(document_id: str, page_number: int) -> tuple[str | None, str | None]:
     supabase = get_supabase()
@@ -125,6 +74,53 @@ def is_missing_annotations_column(error: APIError) -> bool:
         and getattr(error, "code", None) == "42703"
         and "annotations" in str(error)
     )
+
+
+def is_missing_user_id_column(error: APIError) -> bool:
+    return (
+        isinstance(error, APIError)
+        and getattr(error, "code", None) == "42703"
+        and "user_id" in str(error)
+    )
+
+
+def get_document_record(document_id: str, user_id: str | None = None) -> dict:
+    supabase = get_supabase()
+    normalized_user_id = normalize_user_id(user_id)
+
+    try:
+        query = (
+            supabase.table("documents")
+            .select("id, name, created_at, user_id")
+            .eq("id", document_id)
+        )
+        if normalized_user_id:
+            query = query.eq("user_id", normalized_user_id)
+        response = query.limit(1).execute()
+        data = response.data or []
+        if data:
+            return data[0]
+        raise HTTPException(status_code=404, detail="Document not found.")
+    except APIError as exc:
+        if not is_missing_user_id_column(exc):
+            raise
+
+    fallback_response = (
+        supabase.table("documents")
+        .select("id, name, created_at")
+        .eq("id", document_id)
+        .limit(1)
+        .execute()
+    )
+    fallback_data = fallback_response.data or []
+    if not fallback_data:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    document = fallback_data[0]
+    document["user_id"] = settings.default_user_id
+    if normalized_user_id != document["user_id"]:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return document
 
 
 def get_page_record(page_id: str) -> dict:
@@ -160,6 +156,12 @@ def get_page_record(page_id: str) -> dict:
     page = fallback_data[0]
     page["annotations"] = []
     return page
+
+
+def get_page_record_for_user(page_id: str, user_id: str | None) -> tuple[dict, str]:
+    page = get_page_record(page_id)
+    document = get_document_record(page["document_id"], user_id)
+    return page, normalize_user_id(document.get("user_id"))
 
 
 async def generate_and_store_page_summary(page_id: str) -> None:
@@ -228,19 +230,44 @@ def healthcheck() -> dict[str, str]:
 
 
 @app.get("/documents", response_model=list[DocumentListItem])
-def list_documents() -> list[DocumentListItem]:
+def list_documents(
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> list[DocumentListItem]:
     supabase = get_supabase()
-    response = (
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+
+    try:
+        response = (
+            supabase.table("documents")
+            .select("id, name, created_at, user_id")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return response.data or []
+    except APIError as exc:
+        if not is_missing_user_id_column(exc):
+            raise
+
+    if user_id != settings.default_user_id:
+        return []
+
+    fallback_response = (
         supabase.table("documents")
         .select("id, name, created_at")
         .order("created_at", desc=True)
         .execute()
     )
-    return response.data or []
+    return fallback_response.data or []
 
 
 @app.post("/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
+async def upload_document(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> UploadResponse:
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported.")
 
@@ -256,35 +283,39 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     if not pages:
         raise HTTPException(status_code=400, detail="No pages were extracted from the PDF.")
 
-    ensure_storage_bucket()
+    try:
+        ensure_storage_bucket()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     supabase = get_supabase()
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
 
-    document_insert = (
-        supabase.table("documents")
-        .insert({"name": file.filename})
-        .execute()
-    )
-    document = document_insert.data[0]
+    try:
+        document_insert = (
+            supabase.table("documents")
+            .insert({"name": file.filename, "user_id": user_id})
+            .execute()
+        )
+        document = document_insert.data[0]
+    except APIError as exc:
+        if not is_missing_user_id_column(exc):
+            raise
+        document_insert = (
+            supabase.table("documents")
+            .insert({"name": file.filename})
+            .execute()
+        )
+        document = document_insert.data[0]
+        document["user_id"] = user_id
+
     document_id = document["id"]
 
-    extension = Path(file.filename).suffix or ".pdf"
-    if extension.lower() != ".pdf":
-        extension = ".pdf"
-    storage_path = get_document_storage_path(document_id)
     try:
-        storage_result = supabase.storage.from_(settings.supabase_storage_bucket).upload(
-            path=storage_path,
-            file=file_bytes,
-            file_options={"content-type": "application/pdf", "upsert": "false"},
-        )
-    except StorageApiError as exc:
+        upload_document_bytes(document_id=document_id, user_id=user_id, file_bytes=file_bytes)
+    except Exception as exc:
         supabase.table("documents").delete().eq("id", document_id).execute()
         raise HTTPException(status_code=500, detail="Failed to store the uploaded PDF.") from exc
-
-    if getattr(storage_result, "error", None):
-        supabase.table("documents").delete().eq("id", document_id).execute()
-        raise HTTPException(status_code=500, detail="Failed to store the uploaded PDF.")
 
     page_rows = [
         {
@@ -299,7 +330,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         supabase.table("pages").insert(page_rows).execute()
     except Exception as exc:
         try:
-            supabase.storage.from_(settings.supabase_storage_bucket).remove([storage_path])
+            delete_document_file(document_id=document_id, user_id=user_id)
         except Exception:
             pass
         supabase.table("documents").delete().eq("id", document_id).execute()
@@ -313,18 +344,14 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
 
 
 @app.get("/document/{document_id}/pages", response_model=list[PageListItem])
-def list_document_pages(document_id: str) -> list[PageListItem]:
+def list_document_pages(
+    document_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> list[PageListItem]:
     supabase = get_supabase()
-
-    document_response = (
-        supabase.table("documents")
-        .select("id")
-        .eq("id", document_id)
-        .limit(1)
-        .execute()
-    )
-    if not document_response.data:
-        raise HTTPException(status_code=404, detail="Document not found.")
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+    get_document_record(document_id, user_id)
 
     response = (
         supabase.table("pages")
@@ -337,67 +364,38 @@ def list_document_pages(document_id: str) -> list[PageListItem]:
 
 
 @app.get("/document/{document_id}/file-url")
-def get_document_file_url(document_id: str) -> dict[str, str]:
-    supabase = get_supabase()
-
-    document_response = (
-        supabase.table("documents")
-        .select("id")
-        .eq("id", document_id)
-        .limit(1)
-        .execute()
+def get_document_file_url(
+    document_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, str]:
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+    document = get_document_record(document_id, user_id)
+    signed_url = create_document_download_url(
+        document_id=document_id,
+        user_id=document.get("user_id"),
+        expires_in=60 * 60,
     )
-    if not document_response.data:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    storage_path = resolve_document_storage_path(document_id)
-    if not storage_path:
-        raise HTTPException(status_code=404, detail="Stored PDF file not found for this document.")
-
-    try:
-        signed = supabase.storage.from_(settings.supabase_storage_bucket).create_signed_url(
-            storage_path,
-            60 * 60,
-        )
-    except StorageApiError as exc:
-        raise HTTPException(status_code=500, detail="Failed to create a file preview URL.") from exc
-
-    signed_url = signed.get("signedURL")
     if not signed_url:
-        raise HTTPException(status_code=500, detail="Failed to create a file preview URL.")
+        raise HTTPException(status_code=404, detail="Stored PDF file not found for this document.")
 
     return {"url": signed_url}
 
 
 @app.delete("/document/{document_id}")
-def delete_document(document_id: str) -> dict[str, str]:
+def delete_document(
+    document_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> dict[str, str]:
     supabase = get_supabase()
-    document_response = (
-        supabase.table("documents")
-        .select("id")
-        .eq("id", document_id)
-        .limit(1)
-        .execute()
-    )
-    if not document_response.data:
-        raise HTTPException(status_code=404, detail="Document not found.")
-
-    storage_paths: list[str] = []
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+    document = get_document_record(document_id, user_id)
 
     try:
-        stored_files = supabase.storage.from_(settings.supabase_storage_bucket).list(document_id)
-        for item in stored_files:
-            file_name = item.get("name")
-            if isinstance(file_name, str) and file_name:
-                storage_paths.append(f"{document_id}/{file_name}")
-    except StorageApiError:
-        storage_paths = []
-
-    if storage_paths:
-        try:
-            supabase.storage.from_(settings.supabase_storage_bucket).remove(storage_paths)
-        except StorageApiError as exc:
-            raise HTTPException(status_code=500, detail="Failed to delete the stored PDF.") from exc
+        delete_document_file(document_id=document_id, user_id=document.get("user_id"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to delete the stored PDF.") from exc
 
     try:
         supabase.table("documents").delete().eq("id", document_id).execute()
@@ -408,9 +406,15 @@ def delete_document(document_id: str) -> dict[str, str]:
 
 
 @app.get("/page/{page_id}", response_model=PageDetail)
-async def get_page(page_id: str, background_tasks: BackgroundTasks) -> PageDetail:
+async def get_page(
+    page_id: str,
+    background_tasks: BackgroundTasks,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> PageDetail:
     supabase = get_supabase()
-    page = get_page_record(page_id)
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+    page, document_user_id = get_page_record_for_user(page_id, user_id)
 
     if is_reference_page(page.get("content", "")):
         if page.get("summary") != NO_ACCOUNTING_SUMMARY:
@@ -426,26 +430,25 @@ async def get_page(page_id: str, background_tasks: BackgroundTasks) -> PageDetai
     elif not page.get("summary"):
         background_tasks.add_task(generate_and_store_page_summary, page_id)
 
-    storage_path = resolve_document_storage_path(page["document_id"])
-    if not storage_path:
-        page["document_file_url"] = None
-        return page
-
-    try:
-        signed = supabase.storage.from_(settings.supabase_storage_bucket).create_signed_url(
-            storage_path,
-            60 * 60,
-        )
-        page["document_file_url"] = signed.get("signedURL")
-    except StorageApiError:
-        page["document_file_url"] = None
+    page["document_file_url"] = create_document_download_url(
+        document_id=page["document_id"],
+        user_id=document_user_id,
+        expires_in=60 * 60,
+    )
 
     return page
 
 
 @app.put("/page/{page_id}/annotations", response_model=PageDetail)
-def update_page_annotations(page_id: str, payload: UpdatePageAnnotationsRequest) -> PageDetail:
+def update_page_annotations(
+    page_id: str,
+    payload: UpdatePageAnnotationsRequest,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> PageDetail:
     supabase = get_supabase()
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+    _page, document_user_id = get_page_record_for_user(page_id, user_id)
     try:
         response = (
             supabase.table("pages")
@@ -468,52 +471,46 @@ def update_page_annotations(page_id: str, payload: UpdatePageAnnotationsRequest)
         raise HTTPException(status_code=404, detail="Page not found.")
 
     page = get_page_record(page_id)
-
-    storage_path = resolve_document_storage_path(page["document_id"])
-    if not storage_path:
-        page["document_file_url"] = None
-        return page
-
-    try:
-        signed = supabase.storage.from_(settings.supabase_storage_bucket).create_signed_url(
-            storage_path,
-            60 * 60,
-        )
-        page["document_file_url"] = signed.get("signedURL")
-    except StorageApiError:
-        page["document_file_url"] = None
+    page["document_file_url"] = create_document_download_url(
+        document_id=page["document_id"],
+        user_id=document_user_id,
+        expires_in=60 * 60,
+    )
 
     return page
 
 
 @app.post("/page/{page_id}/regenerate-summary", response_model=PageDetail)
-async def regenerate_summary_for_page(page_id: str) -> PageDetail:
+async def regenerate_summary_for_page(
+    page_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> PageDetail:
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+    _page, document_user_id = get_page_record_for_user(page_id, user_id)
     page = await regenerate_page_summary(page_id)
-
-    storage_path = resolve_document_storage_path(page["document_id"])
-    if not storage_path:
-        page["document_file_url"] = None
-        return page
-
-    try:
-        signed = get_supabase().storage.from_(settings.supabase_storage_bucket).create_signed_url(
-            storage_path,
-            60 * 60,
-        )
-        page["document_file_url"] = signed.get("signedURL")
-    except StorageApiError:
-        page["document_file_url"] = None
+    page["document_file_url"] = create_document_download_url(
+        document_id=page["document_id"],
+        user_id=document_user_id,
+        expires_in=60 * 60,
+    )
 
     return page
 
 
 @app.post("/page/{page_id}/ask", response_model=AskPageQuestionResponse)
-async def ask_question_for_page(page_id: str, payload: AskPageQuestionRequest) -> AskPageQuestionResponse:
+async def ask_question_for_page(
+    page_id: str,
+    payload: AskPageQuestionRequest,
+    authorization: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
+) -> AskPageQuestionResponse:
     question = payload.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Enter a question for this page.")
 
-    page = get_page_record(page_id)
+    user_id = get_authenticated_user(authorization, x_user_id).app_user_id
+    page, _document_user_id = get_page_record_for_user(page_id, user_id)
     previous_page_text, next_page_text = get_adjacent_page_context(
         page["document_id"],
         page["page_number"],
