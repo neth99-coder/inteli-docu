@@ -1,10 +1,14 @@
 from functools import lru_cache
 import base64
 import json
+from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_core import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+BACKEND_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 
 class Settings(BaseSettings):
@@ -14,7 +18,16 @@ class Settings(BaseSettings):
 
     supabase_url: str = Field(alias="SUPABASE_URL")
     supabase_service_role_key: str = Field(alias="SUPABASE_SERVICE_ROLE_KEY")
-    supabase_storage_bucket: str = Field(default="documents", alias="SUPABASE_STORAGE_BUCKET")
+    legacy_supabase_storage_bucket: str = Field(default="documents", alias="SUPABASE_STORAGE_BUCKET")
+
+    aws_region: str = Field(alias="AWS_REGION")
+    aws_access_key_id: str = Field(alias="AWS_ACCESS_KEY_ID")
+    aws_secret_access_key: str = Field(alias="AWS_SECRET_ACCESS_KEY")
+    aws_s3_bucket: str = Field(alias="AWS_S3_BUCKET")
+    aws_s3_endpoint_url: str | None = Field(default=None, alias="AWS_S3_ENDPOINT_URL")
+
+    default_user_id: str = Field(default="default", alias="DEFAULT_USER_ID")
+    allow_legacy_auth_fallback: bool = Field(default=True, alias="ALLOW_LEGACY_AUTH_FALLBACK")
 
     llm_provider: str = Field(default="gemini", alias="LLM_PROVIDER")
 
@@ -29,11 +42,20 @@ class Settings(BaseSettings):
     openrouter_app_name: str = Field(default="Document Intelligence API", alias="OPENROUTER_APP_NAME")
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=BACKEND_ENV_FILE,
         env_file_encoding="utf-8",
+        env_ignore_empty=True,
         case_sensitive=False,
         extra="ignore",
     )
+
+    @field_validator("aws_s3_endpoint_url", mode="before")
+    @classmethod
+    def _empty_endpoint_to_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
 
     @property
     def gemini_fallback_models(self) -> list[str]:

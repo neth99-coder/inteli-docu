@@ -19,6 +19,7 @@ class PageAnnotation(BaseModel):
 class DocumentListItem(BaseModel):
     id: UUID
     name: str
+    user_id: Optional[str] = None
     created_at: datetime
 
 
